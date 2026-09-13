@@ -1,0 +1,10 @@
+{"query": "What are transformers in machine learning?", "notes": "Core architecture question"}
+{"query": "Explain the attention mechanism in neural networks.", "notes": "Semantic phrasing"}
+{"query": "LoRA fine-tuning advantages", "notes": "Keyword / abbreviation heavy"}
+{"query": "Compare supervised and unsupervised learning.", "notes": "General ML concept"}
+{"query": "What is retrieval-augmented generation?", "notes": "RAG definition"}
+{"query": "How does BM25 differ from dense vector search?", "notes": "Retrieval fundamentals"}
+{"query": "Recent advances in large language models", "notes": "Broad survey-style question"}
+{"query": "What is gradient descent?", "notes": "Basic optimization"}
+{"query": "Explain self-attention vs cross-attention.", "notes": "Fine-grained comparison"}
+{"query": "What papers discuss efficient fine-tuning?", "notes": "Open-ended literature question"}

@@ -1,0 +1,2 @@
+query,reference,notes,mode,status_code,latency_ms,answer,sources,retrieved_contexts,chunks_used,search_mode,retrieval_attempts,reasoning_steps,faithfulness,context_precision,factual_correctness,context_recall,unsupported_response,ragas_error,error,manual_score_1_to_5,manual_comment
+What is retrieval-augmented generation?,,smoke test,standard,200,149.9,I couldn't find any relevant information in the papers to answer your question.,,[],0,bm25,,,,,,,,no retrieved contexts,,,

@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-09-05T14:58:39.064733+00:00",
+  "judge_model": "qwen3.7-flash",
+  "faithfulness_threshold": 1.0,
+  "unsupported_response_definition": "Ragas faithfulness < threshold among successfully scored responses",
+  "overall": {
+    "requests": 1,
+    "successful_requests": 1,
+    "faithfulness_scored": 0,
+    "unsupported_responses": 0,
+    "observed_unsupported_response_rate": null,
+    "mean_faithfulness": null,
+    "mean_context_precision": null,
+    "mean_factual_correctness": null,
+    "mean_context_recall": null
+  },
+  "by_mode": {
+    "standard": {
+      "requests": 1,
+      "successful_requests": 1,
+      "faithfulness_scored": 0,
+      "unsupported_responses": 0,
+      "observed_unsupported_response_rate": null,
+      "mean_faithfulness": null,
+      "mean_context_precision": null,
+      "mean_factual_correctness": null,
+      "mean_context_recall": null
+    }
+  }
+}

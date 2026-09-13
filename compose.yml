@@ -1,0 +1,399 @@
+# 默认架构：在线 OpenAI-compatible LLM + 宿主机已有的 OpenSearch。
+# 不会启动或拉取 Ollama；如没有现成 OpenSearch，可显式启用 bundled-search profile。
+services:
+  # FastAPI 应用（对外 API）
+  api:
+    build:
+      context: .
+      args:
+        UV_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+        UV_REWRITE_HOSTED_PACKAGES: "true"
+    container_name: rag-api
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    env_file:
+      - .env
+    environment:
+      # 仅作用于本服务，覆盖 .env 中同名变量
+      # 容器通过宿主机端口复用已有 OpenSearch；需要时可用 OPENSEARCH_DOCKER_HOST 覆盖。
+      - OPENSEARCH_HOST=${OPENSEARCH_DOCKER_HOST:-http://host.docker.internal:9200}
+      - OPENSEARCH__HOST=${OPENSEARCH_DOCKER_HOST:-http://host.docker.internal:9200}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_MODEL_FALLBACK=${OPENAI_MODEL_FALLBACK:-}
+      - POSTGRES_DATABASE_URL=postgresql+psycopg2://rag_user:rag_password@postgres:5432/rag_db
+      - LANGFUSE_HOST=http://langfuse-web:3000 
+      - LANGFUSE_DEBUG=true
+      - REDIS__HOST=redis
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - EMBEDDINGS__MODEL_PATH=/app/models/bge-small-zh-v1.5
+      - UPLOAD__UPLOAD_DIR=/app/data/uploads
+    volumes:
+      - ./models:/app/models
+      - ./data/uploads:/app/data/uploads
+    networks:
+      - rag-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  opensearch:
+    # 仅供没有现成 OpenSearch 的环境使用：
+    # docker compose --profile bundled-search up -d opensearch opensearch-dashboards
+    profiles: ["bundled-search"]
+    image: opensearchproject/opensearch:2.19.0
+    # 使用官方 OpenSearch 镜像
+    container_name: rag-opensearch
+    environment:
+      - discovery.type=single-node
+      # 单节点集群（开发/本地常用）
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      # JVM 堆内存上下限
+      - DISABLE_SECURITY_PLUGIN=true
+      # 关闭安全插件，HTTP 直连，无需账号密码（仅限可信网络）
+      - bootstrap.memory_lock=true
+      # 将 JVM 堆锁定在物理内存，减少换页到磁盘
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+      # 数据卷持久化，删容器不丢索引数据
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  opensearch-dashboards:
+    profiles: ["bundled-search"]
+    image: opensearchproject/opensearch-dashboards:2.19.0
+    container_name: rag-dashboards
+    ports:
+      - "5601:5601"
+    environment:
+      - OPENSEARCH_HOSTS=http://opensearch:9200
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    depends_on:
+      - opensearch
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - rag-network
+
+  airflow:
+    build: 
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: rag-airflow
+    # user: "50000:0"  # WSL/Ubuntu 可取消注释；Mac 上请保持注释
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Airflow 专用环境
+      - AIRFLOW_HOME=/opt/airflow
+      - PYTHONPATH=/opt/airflow/src
+      # 数据库与 Redis 在 Compose 网络内；OpenSearch 复用宿主机已有实例。
+      - POSTGRES_DATABASE_URL=postgresql+psycopg2://rag_user:rag_password@postgres:5432/rag_db
+      - OPENSEARCH_HOST=${OPENSEARCH_DOCKER_HOST:-http://host.docker.internal:9200}
+      - OPENSEARCH__HOST=${OPENSEARCH_DOCKER_HOST:-http://host.docker.internal:9200}
+      - REDIS__HOST=redis
+      # Docling pulls models via huggingface_hub inside the container; without mirror / long timeout,
+      # CN or IPv6-broken Docker setups often hit ConnectError errno 97 (EAFNOSUPPORT) or LocalEntryNotFoundError.
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT:-600}
+      - HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT:-120}
+      - EMBEDDINGS__MODEL_PATH=/app/models/bge-small-zh-v1.5
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./src:/opt/airflow/src
+      - ./models:/app/models
+    ports:
+      - "8080:8080"
+    # 启动命令由 airflow 镜像内 entrypoint.sh 处理
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - rag-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: rag-postgres
+    environment:
+      - POSTGRES_DB=rag_db
+      - POSTGRES_USER=rag_user
+      - POSTGRES_PASSWORD=rag_password
+      - POSTGRES_HOST_AUTH_METHOD=password
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag_user -d rag_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # Langfuse 分析后端：ClickHouse
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: rag-clickhouse
+    environment:
+      - CLICKHOUSE_DB=langfuse
+      - CLICKHOUSE_USER=langfuse
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_PASSWORD=langfuse
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3
+    container_name: rag-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "3030:3030"
+    environment:
+      NEXTAUTH_URL: http://localhost:3001
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      # 敏感项从 .env 注入（勿提交真实密钥到仓库）
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: langfuse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_USE_AZURE_BLOB: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ACCESS_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_SECRET_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ACCESS_KEY}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_SECRET_KEY}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+      REDIS_TLS_ENABLED: "false"
+    networks:
+      - rag-network
+
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3
+    container_name: rag-langfuse-web
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "3001:3000"
+    environment:
+      NEXTAUTH_URL: http://localhost:3001
+      # 敏感项从 .env 注入
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: langfuse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_USE_AZURE_BLOB: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ACCESS_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_SECRET_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ACCESS_KEY}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_SECRET_KEY}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+      REDIS_TLS_ENABLED: "false"
+      LANGFUSE_INIT_ORG_ID: "default-org"
+      LANGFUSE_INIT_ORG_NAME: "RAG Organization"
+      LANGFUSE_INIT_PROJECT_NAME: "Agentic RAG"
+      LANGFUSE_INIT_USER_EMAIL: "admin@example.com"
+      LANGFUSE_INIT_USER_NAME: "Admin User"
+      LANGFUSE_INIT_USER_PASSWORD: "admin123"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/public/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - rag-network
+
+  langfuse-postgres:
+    image: postgres:17
+    container_name: rag-langfuse-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=langfuse
+      - POSTGRES_DB=langfuse
+      - POSTGRES_HOST_AUTH_METHOD=password
+      - TZ=UTC
+      - PGTZ=UTC
+    ports:
+      - "5433:5432"
+    volumes:
+      - langfuse_v3_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - rag-network
+
+  langfuse-redis:
+    image: docker.io/redis:7
+    container_name: rag-langfuse-redis
+    restart: unless-stopped
+    command: --requirepass langfuse_redis_password
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "langfuse_redis_password", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    networks:
+      - rag-network
+
+  langfuse-minio:
+    image: docker.io/minio/minio
+    container_name: rag-langfuse-minio
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      - MINIO_ROOT_USER=langfuse_minio
+      - MINIO_ROOT_PASSWORD=langfuse_minio_secret
+    ports:
+      - "9090:9000"
+      - "9091:9001"
+    volumes:
+      - langfuse_v3_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - rag-network
+
+
+volumes:
+  postgres_data:
+  opensearch_data:
+  airflow_logs:
+  clickhouse_data:
+  redis_data:
+  langfuse_v3_postgres_data:
+  langfuse_v3_minio_data:
+
+networks:
+  rag-network:
+    driver: bridge

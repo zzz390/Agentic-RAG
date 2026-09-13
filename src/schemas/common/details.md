@@ -1,0 +1,1 @@
+本身不定义任何数据模型，作用是一个 “汇总导出包”（barrel export）：从各个子模块把 Pydantic 类 集中 re-export 一遍，并配上 __all__ 声明对外公开的名字。
