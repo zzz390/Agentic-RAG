@@ -184,6 +184,14 @@ body, .gradio-container {
 .memory-note p { margin: 0 !important; color: #397665 !important; font-size: .84rem !important; }
 
 .upload-card { padding: 20px !important; }
+.library-card {
+    padding: 18px 20px !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 18px !important;
+    background: linear-gradient(180deg, #ffffff 0%, #f9faff 100%) !important;
+}
+.library-card table { font-size: .86rem !important; }
+.library-card th { color: var(--muted) !important; }
 .footer-note { padding: 12px 6px 0 !important; text-align: center; }
 .footer-note p { color: var(--muted) !important; font-size: .82rem !important; }
 .footer-note a { color: #5d55dd !important; text-decoration: none !important; }
@@ -207,6 +215,37 @@ async def check_api_health() -> str:
         return f"⚠️ API 返回 HTTP {response.status_code}"
     except httpx.RequestError as exc:
         return f"❌ 无法连接 API: {exc}\n请先启动后端（docker compose up 或 uvicorn）。"
+
+
+async def fetch_library_overview() -> str:
+    """获取最近入库的文献，用于知识库展示面板。"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{API_BASE_URL}/papers", params={"limit": 10})
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Failed to load library overview: %s", exc)
+        return "### 已入库文献\n\n暂时无法读取知识库列表，请检查后端连接。"
+
+    papers = payload.get("papers", [])
+    total = int(payload.get("total", len(papers)))
+    if not papers:
+        return "### 已入库文献\n\n知识库还是空的，上传第一份资料开始构建检索空间。"
+
+    lines = [
+        f"### 已入库 {total} 篇文献",
+        "最近文献已完成全文解析与混合检索索引。",
+        "",
+        "| 文献 | 来源 | 状态 |",
+        "| --- | --- | --- |",
+    ]
+    for paper in papers:
+        title = str(paper.get("title") or "未命名文献").replace("|", "\\|").replace("\n", " ")
+        source = "本地上传" if paper.get("source_type") == "upload" else "arXiv"
+        indexed = "✅ 可检索" if paper.get("pdf_processed") else "⏳ 处理中"
+        lines.append(f"| {title} | {source} | {indexed} |")
+    return "\n".join(lines)
 
 
 def _format_sources(
@@ -690,7 +729,14 @@ def create_gradio_interface() -> gr.Blocks:
                     up_title = gr.Textbox(label="自定义标题（可选）", placeholder="留空时使用文件名")
                     up_btn = gr.Button("解析并加入知识库  →", variant="primary", elem_classes="primary-action")
                     up_status = gr.Markdown("支持 PDF、Word、Markdown、文本和 Excel 文件。")
-                    up_btn.click(fn=upload_document, inputs=[up_file, up_title], outputs=up_status)
+                    upload_event = up_btn.click(fn=upload_document, inputs=[up_file, up_title], outputs=up_status)
+
+                with gr.Row():
+                    gr.Markdown("文献列表会自动刷新，也可以手动同步最新索引。", scale=5)
+                    refresh_library = gr.Button("刷新文献", size="sm", elem_classes="secondary-action", scale=1)
+                library_overview = gr.Markdown(elem_classes="library-card")
+                refresh_library.click(fn=fetch_library_overview, outputs=library_overview)
+                upload_event.then(fn=fetch_library_overview, outputs=library_overview)
 
         gr.Markdown(
             """
@@ -702,6 +748,8 @@ def create_gradio_interface() -> gr.Blocks:
             """,
             elem_classes="footer-note",
         )
+
+        interface.load(fn=fetch_library_overview, outputs=library_overview)
 
     return interface
 

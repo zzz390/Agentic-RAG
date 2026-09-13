@@ -77,6 +77,9 @@ flowchart LR
 ## 界面与 API
 
 新版 ScholarFlow 界面包含快速问答、深度研究、知识库上传和统一的检索参数面板。
+下图的演示知识库已收录 10 篇 Transformer、RAG、检索与 Agent 方向的代表性论文。
+
+![ScholarFlow knowledge base](docs/screenshots/03-upload.png)
 
 | Swagger API | 标准 RAG | Agentic RAG |
 |---|---|---|
